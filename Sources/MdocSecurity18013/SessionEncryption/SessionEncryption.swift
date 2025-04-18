@@ -54,6 +54,22 @@ public struct SessionEncryption: Sendable {
 		sessionKeys = CoseKeyExchange(publicKey: ok, privateKey: pk)
 		self.handOver = handOver
 	}
+    
+    /// Initialization of session encryption for the reader
+    /// - Parameters:
+    ///   - eReaderKey: session establishment data from the mdoc reader
+    ///   - deviceEngagementData: device engagement as contend of the scanned  qr-code
+    ///   - handOver: handover object according to the transfer protocol
+    public init?(eReaderKey: CoseKeyPrivate, deviceEngagementData: Data, handOver: CBOR) {
+        self.sessionRole = .reader
+        deviceEngagementRawData = [UInt8](deviceEngagementData)
+        guard let eDeviceKey = DeviceEngagement(data: deviceEngagementData.bytes)?.security.deviceKey else {
+            logger.error("Device engagement for reader must have the device key"); return nil
+        }
+        self.eReaderKeyRawData = eReaderKey.key.toCBOR(options: CBOROptions()).encode()
+        sessionKeys = CoseKeyExchange(publicKey: eDeviceKey, privateKey: eReaderKey)
+        self.handOver = handOver
+    }
 	
 	/// Make nonce function to initialize the encryption or decryption
 	///
