@@ -48,10 +48,8 @@ public struct SessionEncryption: Sendable {
 		sessionRole = .mdoc
 		deviceEngagementRawData = de.qrCoded ?? de.encode(options: CBOROptions())
 		guard let pk = de.privateKey else { logger.error("Device engagement for mdoc must have the private key"); return nil}
-		guard let rkrd = se.eReaderKeyRawData else { logger.error("Reader key data not available"); return nil}
-		self.eReaderKeyRawData = rkrd
-		guard let ok = se.eReaderKey else { logger.error("Could not decode ereader key"); return nil}
-		sessionKeys = CoseKeyExchange(publicKey: ok, privateKey: pk)
+		self.eReaderKeyRawData = se.eReaderKeyRawData
+		sessionKeys = CoseKeyExchange(publicKey: se.eReaderKey, privateKey: pk)
 		self.handOver = handOver
 	}
     
@@ -122,7 +120,7 @@ public struct SessionEncryption: Sendable {
 	/// Session keys are derived using ECKA-DH (Elliptic Curve Key Agreement Algorithm – Diffie-Hellman) as defined in BSI TR-03111
 	mutating func makeKeyAgreementAndDeriveSessionKey(isEncrypt: Bool) async throws -> SymmetricKey?  {
         if sessionKeys.privateKey.privateKeyId == nil { try await sessionKeys.privateKey.makeKey(curve: type(of: sessionKeys.privateKey.secureArea).defaultEcCurve) }
-		guard let sharedKey = await sessionKeys.makeEckaDHAgreement() else { logger.error("Error in ECKA session key agreement"); return nil} //.x963Representation)
+		let sharedKey = try await sessionKeys.makeEckaDHAgreement()
 		let symmetricKey = try Self.HMACKeyDerivationFunction(sharedSecret: sharedKey, salt: sessionTranscriptBytes, info: getInfo(isEncrypt: isEncrypt).data(using: .utf8)!)
 		return symmetricKey
 	}
