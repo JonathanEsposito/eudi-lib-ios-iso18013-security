@@ -14,41 +14,42 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-//  SessionTranscript.swift
+//  ProximitySessionTranscript.swift
 
 import Foundation
 import MdocDataModel18013
 import SwiftCBOR
 
 /// SessionTranscript = [DeviceEngagementBytes,EReaderKeyBytes,Handover]
-public struct SessionTranscript: Sendable {
+public struct ProximitySessionTranscript: SessionTranscript {
 	/// device engagement bytes (NOT tagged)
-	let devEngRawData: [UInt8]?
+    private let deviceEngagement: DeviceEngagement
 	/// reader key bytes ( NOT tagged)
-	let eReaderRawData: [UInt8]?
+    private let eReaderKey: [UInt8]
 	// handover object
-	let handOver: CBOR
-		
-	public init(devEngRawData: [UInt8]? = nil, eReaderRawData: [UInt8]? = nil, handOver: CBOR) {
-		self.devEngRawData = devEngRawData
-		self.eReaderRawData = eReaderRawData
+    private let handOver: CBOR
+    
+    public init(deviceEngagement: DeviceEngagement, eReaderKey: [UInt8], handOver: CBOR) {
+		self.deviceEngagement = deviceEngagement
+		self.eReaderKey = eReaderKey
 		self.handOver = handOver
 	}
+    
+    /// SessionTranscript = [DeviceEngagementBytes,EReaderKeyBytes,Handover]
+    public var bytes: [UInt8] {
+        taggedEncoded.encode(options: CBOROptions())
+    }
+    
 }
-#if DEBUG
-// initializer used for tests only
-extension SessionTranscript: CBORDecodable {
-	public init?(cbor: CBOR) {
-		guard case let .array(arr) = cbor, arr.count == 3 else { return nil }
-		if let d = arr[0].decodeTaggedBytes() { devEngRawData = d } else { devEngRawData = nil }
-		if let e = arr[1].decodeTaggedBytes() { eReaderRawData = e; } else { eReaderRawData = nil }
-		handOver = arr[2]
-	}
-}
-#endif
 
-extension SessionTranscript: CBOREncodable {
+extension ProximitySessionTranscript: CBOREncodable {
 	public func toCBOR(options: CBOROptions) -> CBOR {
-		return .array([devEngRawData?.taggedEncoded ?? CBOR.null, eReaderRawData?.taggedEncoded ?? CBOR.null, handOver])
+        return .array(
+            [
+                (deviceEngagement.qrCoded ?? deviceEngagement.encode(options: CBOROptions())).taggedEncoded,
+                eReaderKey.taggedEncoded,
+                handOver
+            ]
+        )
 	}
 }

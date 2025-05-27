@@ -28,23 +28,14 @@ import SwiftCBOR
 /// ```swift
 /// let mdocAuth = MdocAuthentication(transcript: sessionEncr.transcript, authKeys: authKeys)
 /// ```
-public struct MdocAuthentication: Sendable {
+public struct MdocAuthentication {
 	
-    let transcript: SessionTranscript
-    let authKeys: CoseKeyExchange
-    var sessionTranscriptBytes: [UInt8] { transcript.toCBOR(options: CBOROptions()).taggedEncoded.encode(options: CBOROptions()) }
+    private let transcript: SessionTranscript
+    private let authKeys: CoseKeyExchange
 	
 	public init(transcript: SessionTranscript, authKeys: CoseKeyExchange) {
 		self.transcript = transcript
 		self.authKeys = authKeys
-	}
-
-	/// Calculate the ephemeral MAC key, by performing ECKA-DH (Elliptic Curve Key Agreement Algorithm – Diffie-Hellman)
-	/// The inputs shall be the SDeviceKey.Priv and EReaderKey.Pub for the mdoc and EReaderKey.Priv and SDeviceKey.Pub for the mdoc reader.
-    func makeMACKeyAgreementAndDeriveKey(deviceAuth: DeviceAuthentication) async throws -> SymmetricKey {
-		let sharedKey = try await authKeys.makeEckaDHAgreement()
-		let symmetricKey = try SessionEncryption.HMACKeyDerivationFunction(sharedSecret: sharedKey, salt: sessionTranscriptBytes, info: "EMacKey".data(using: .utf8)!)
-		return symmetricKey
 	}
 	
 	/// Generate a ``DeviceAuth`` structure used for mdoc-authentication
@@ -53,17 +44,20 @@ public struct MdocAuthentication: Sendable {
 	///   - deviceNameSpacesRawData: device-name spaces raw data. Usually is a CBOR-encoded empty dictionary
 	///   - bUseDeviceSign: Specify true for device authentication (false is default)
 	/// - Returns: DeviceAuth instance
-    public func getDeviceAuthForTransfer(docType: String, deviceNameSpacesRawData: [UInt8] = [0xA0], dauthMethod: DeviceAuthMethod, unlockData: Data?) async throws -> DeviceAuth {
-		let da = DeviceAuthentication(sessionTranscript: transcript, docType: docType, deviceNameSpacesRawData: deviceNameSpacesRawData)
-		let contentBytes = da.toCBOR(options: CBOROptions()).taggedEncoded.encode(options: CBOROptions())
+    public func getDeviceAuthForTransfer(docType: String, deviceNameSpacesRawData: [UInt8] = [0xA0]) throws -> DeviceAuth {
+		let deviceAuthentication = DeviceAuthentication(sessionTranscript: transcript, docType: docType, deviceNameSpacesRawData: deviceNameSpacesRawData)
+		let contentBytes = deviceAuthentication.toCBOR(options: CBOROptions()).taggedEncoded.encode(options: CBOROptions())
 		let coseRes: Cose
-		if dauthMethod == .deviceSignature {
-            coseRes = try await Cose.makeDetachedCoseSign1(payloadData: Data(contentBytes), deviceKey: authKeys.privateKey, alg: .es256, unlockData: unlockData)
-		} else {
-            // this is the preferred method
-            let symmetricKey = try await self.makeMACKeyAgreementAndDeriveKey(deviceAuth: da)
-            coseRes = Cose.makeDetachedCoseMac0(payloadData: Data(contentBytes), key: symmetricKey, alg: .hmac256)
-	    }
+        
+        switch authKeys.privateKey {
+        case .signing(let walletSigningKey): // DeviceSignature
+            coseRes = try Cose.makeDetachedCoseSign1(deviceKey: walletSigningKey, payloadData: Data(contentBytes))
+        case .encryption(let walletEncryptionKey): // MAC
+            let symmetricKey = try walletEncryptionKey.hkdfDerivedSymmetricKey(salt: transcript.bytes, publicKey: authKeys.publicKey.getx963Representation(), sharedInfo: Data("EMacKey".utf8))
+            coseRes = Cose.makeDetachedCoseMac0(payloadData: Data(contentBytes), key: symmetricKey, alg: walletEncryptionKey.curve.defaultMacAlgorithm)
+        }
+        
 		return DeviceAuth(coseMacOrSignature: coseRes)
 	}
+    
 }

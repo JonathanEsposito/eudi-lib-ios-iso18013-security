@@ -27,17 +27,17 @@ import OrderedCollections
 public struct SessionEstablishment: Sendable {
     public let data: [UInt8]
     public let eReaderKey: CoseKey
-    public var eReaderKeyRawData: [UInt8]
+    public let eReaderKeyRawData: [UInt8]
 	
 	enum CodingKeys: String, CodingKey {
 		case eReaderKey
 		case data
 	}
     
-    public init(eReaderKey: CoseKey, data: [UInt8]) {
+    public init(eReaderKey: WalletEncryptionKey, data: [UInt8]) {
         self.data = data
-        self.eReaderKey = eReaderKey
-        self.eReaderKeyRawData = eReaderKey.toCBOR(options: CBOROptions()).encode()
+        self.eReaderKey = eReaderKey.publicCoseKey
+        self.eReaderKeyRawData = eReaderKey.publicCoseKey.toCBOR(options: CBOROptions()).encode()
     }
     
     public init?(_ data: Data) throws {
@@ -69,4 +69,3 @@ extension SessionEstablishment: CBOREncodable {
 		return .map(res)
 	}
 }
-

@@ -26,18 +26,18 @@ import SwiftCBOR
 /// ```swift
 /// var se = SessionEncryption(se: sessionEstablishmentObject, de: deviceEngagementObject, handOver: handOverObject)
 /// ```
-public struct SessionEncryption: Sendable {
-	public let sessionRole: SessionRole
-	var sessionCounter: UInt32 = 1
-	var errorCode: UInt?
-	static let IDENTIFIER0: [UInt8] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
-	static let IDENTIFIER1: [UInt8] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]
-	var encryptionIdentifier: [UInt8] { sessionRole == .reader ? Self.IDENTIFIER0 : Self.IDENTIFIER1 }
-	var decryptionIdentifier: [UInt8] { sessionRole == .reader ? Self.IDENTIFIER1 : Self.IDENTIFIER0 }
-	public var sessionKeys: CoseKeyExchange
-	var deviceEngagementRawData: [UInt8]
-	let eReaderKeyRawData: [UInt8]
-	let handOver: CBOR
+public struct SessionEncryption {
+    
+    enum SessionEncryptionError: Error {
+        case deviceRequestFailedToDecrypt
+    }
+    
+    public let publicKey: CoseKey
+    public let transcript: SessionTranscript
+    
+    private let sessionRole: SessionRole
+    private var sessionCounter: UInt32 = 1
+    private let privateKey: WalletEncryptionKey
 	
 	/// Initialization of session encryption for the mdoc
 	/// - Parameters:
@@ -46,11 +46,11 @@ public struct SessionEncryption: Sendable {
 	///   - handOver: handover object according to the transfer protocol
 	public init?(se: SessionEstablishment, de: DeviceEngagement, handOver: CBOR) {
 		sessionRole = .mdoc
-		deviceEngagementRawData = de.qrCoded ?? de.encode(options: CBOROptions())
 		guard let pk = de.privateKey else { logger.error("Device engagement for mdoc must have the private key"); return nil}
-		self.eReaderKeyRawData = se.eReaderKeyRawData
-		sessionKeys = CoseKeyExchange(publicKey: se.eReaderKey, privateKey: pk)
-		self.handOver = handOver
+        self.transcript = ProximitySessionTranscript(deviceEngagement: de, eReaderKey: se.eReaderKeyRawData, handOver: handOver)
+        
+        self.publicKey = se.eReaderKey
+        self.privateKey = pk
 	}
     
     /// Initialization of session encryption for the reader
@@ -58,73 +58,46 @@ public struct SessionEncryption: Sendable {
     ///   - eReaderKey: session establishment data from the mdoc reader
     ///   - deviceEngagementData: device engagement as contend of the scanned  qr-code
     ///   - handOver: handover object according to the transfer protocol
-    public init?(eReaderKey: CoseKeyPrivate, deviceEngagementData: Data, handOver: CBOR) {
+    public init(eReaderKey: WalletEncryptionKey, deviceEngagement: DeviceEngagement, handOver: CBOR) {
         self.sessionRole = .reader
-        deviceEngagementRawData = [UInt8](deviceEngagementData)
-        guard let eDeviceKey = DeviceEngagement(data: deviceEngagementData.bytes)?.security.deviceKey else {
-            logger.error("Device engagement for reader must have the device key"); return nil
-        }
-        self.eReaderKeyRawData = eReaderKey.key.toCBOR(options: CBOROptions()).encode()
-        sessionKeys = CoseKeyExchange(publicKey: eDeviceKey, privateKey: eReaderKey)
-        self.handOver = handOver
+        let eDeviceKey = deviceEngagement.security.deviceKey
+        self.publicKey = eDeviceKey
+        self.privateKey = eReaderKey
+        self.transcript = ProximitySessionTranscript(deviceEngagement: deviceEngagement, eReaderKey: eReaderKey.publicCoseKey.encode(), handOver: handOver)
     }
 	
-	/// Make nonce function to initialize the encryption or decryption
-	///
-	/// - Parameters:
-	///   - counter: The message counter value shall be a 4-byte big-endian unsigned integer. For the first encryption with a session key, the message counter shall be set to 1. Before each following encryption with the same key, the message counter value shall be increased by 1
-	///   - isEncrypt: is for encrypt?
-	/// - Returns: The IV (Initialization Vector) used for the encryption.
-	func makeNonce(_ counter: UInt32, isEncrypt: Bool) throws -> AES.GCM.Nonce {
-		var dataNonce = Data()
-		let identifier = isEncrypt ? encryptionIdentifier : decryptionIdentifier
-		dataNonce.append(Data(identifier))
-		dataNonce.append(Data(counter.byteArrayLittleEndian))
-		let nonce = try AES.GCM.Nonce(data: dataNonce)
-		return nonce
-	}
-	
-	/// computation of HKDF symmetric key 
-	static func HMACKeyDerivationFunction(sharedSecret: SharedSecret, salt: [UInt8], info: Data) throws -> SymmetricKey {
-		let symmetricKey = sharedSecret.hkdfDerivedSymmetricKey(using: SHA256.self, salt: salt, sharedInfo: info, outputByteCount: 32)
-		return symmetricKey
-	}
-	
-	/// encrypt data using current nonce as described in 9.1.1.5 Cryptographic operations
-	mutating public func encrypt(_ data: [UInt8]) async throws -> [UInt8]? {
-		let nonce = try makeNonce(sessionCounter, isEncrypt: true)
-		guard let symmetricKeyForEncrypt = try await makeKeyAgreementAndDeriveSessionKey(isEncrypt: true) else { return nil }
-		guard let encryptedContent = try AES.GCM.seal(data, using: symmetricKeyForEncrypt, nonce: nonce).combined else { return nil }
+	/// Encrypt data using current nonce as described in 9.1.1.5 Cryptographic operations
+	mutating public func encrypt(_ data: [UInt8]) throws -> [UInt8] {
+        let nonce = try makeNonce(sessionCounter, identifier: sessionRole.encryptionIdentifier)
+        let symmetricKey = try privateKey.hkdfDerivedSymmetricKey(salt: transcript.bytes, publicKey: publicKey.getx963Representation(), sharedInfo: sessionRole.encryptionSharedInfo)
+		guard let encryptedContent = try AES.GCM.seal(data, using: symmetricKey, nonce: nonce).combined else { throw SessionEncryptionError.deviceRequestFailedToDecrypt }
 		if sessionRole == .mdoc { sessionCounter += 1 }
 		return [UInt8](encryptedContent.dropFirst(12))
 	}
 	
-	/// decryptes cipher data using the symmetric key
-	mutating public func decrypt(_ ciphertext: [UInt8]) async throws -> [UInt8]? {
-		let nonce = try makeNonce(sessionCounter, isEncrypt: false)
+	/// Decrypts cipher data using the symmetric key
+	mutating public func decrypt(_ ciphertext: [UInt8]) throws -> [UInt8] {
+        let nonce = try makeNonce(sessionCounter, identifier: sessionRole.decryptionIdentifier)
 		let sealedBox = try AES.GCM.SealedBox(combined: nonce + ciphertext)
-		guard let symmetricKeyForDecrypt = try await makeKeyAgreementAndDeriveSessionKey(isEncrypt: false) else { return nil }
-		let decryptedContent = try AES.GCM.open(sealedBox, using: symmetricKeyForDecrypt)
+        let symmetricKey = try privateKey.hkdfDerivedSymmetricKey(salt: transcript.bytes, publicKey: publicKey.getx963Representation(), sharedInfo: sessionRole.decryptionSharedInfo)
+		let decryptedContent = try AES.GCM.open(sealedBox, using: symmetricKey)
 		return [UInt8](decryptedContent)
 	}
-	public var transcript: SessionTranscript { SessionTranscript(devEngRawData: deviceEngagementRawData, eReaderRawData: eReaderKeyRawData, handOver: handOver) }
-	
-	/// SessionTranscript = [DeviceEngagementBytes,EReaderKeyBytes,Handover]
-	public var sessionTranscriptBytes: [UInt8] {
-		let trCbor = transcript.taggedEncoded
-		return trCbor.encode(options: CBOROptions())
-	}
-	
-	func getInfo(isEncrypt: Bool) -> String { isEncrypt ? (sessionRole == .mdoc ? "SKDevice" : "SKReader") : (sessionRole == .mdoc ? "SKReader" : "SKDevice") }
-	
-	/// Session keys are derived using ECKA-DH (Elliptic Curve Key Agreement Algorithm – Diffie-Hellman) as defined in BSI TR-03111
-	mutating func makeKeyAgreementAndDeriveSessionKey(isEncrypt: Bool) async throws -> SymmetricKey?  {
-        if sessionKeys.privateKey.privateKeyId == nil { try await sessionKeys.privateKey.makeKey(curve: type(of: sessionKeys.privateKey.secureArea).defaultEcCurve) }
-		let sharedKey = try await sessionKeys.makeEckaDHAgreement()
-		let symmetricKey = try Self.HMACKeyDerivationFunction(sharedSecret: sharedKey, salt: sessionTranscriptBytes, info: getInfo(isEncrypt: isEncrypt).data(using: .utf8)!)
-		return symmetricKey
-	}
-
+    
+    // MARK: - Private Methods
+    
+    /// Make nonce function to initialize the encryption or decryption
+    ///
+    /// - Parameters:
+    ///   - counter: The message counter value shall be a 4-byte big-endian unsigned integer. For the first encryption with a session key, the message counter shall be set to 1. Before each following encryption with the same key, the message counter value shall be increased by 1
+    ///   - isEncrypt: is for encrypt?
+    /// - Returns: The IV (Initialization Vector) used for the encryption.
+    private func makeNonce(_ counter: UInt32, identifier: [UInt8]) throws -> AES.GCM.Nonce {
+        var dataNonce = Data()
+        dataNonce.append(Data(identifier))
+        dataNonce.append(Data(counter.byteArrayLittleEndian))
+        let nonce = try AES.GCM.Nonce(data: dataNonce)
+        return nonce
+    }
 	
 }
-
