@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import SwiftCBOR
 
 public protocol SessionTranscript {
     var bytes: [UInt8] { get }

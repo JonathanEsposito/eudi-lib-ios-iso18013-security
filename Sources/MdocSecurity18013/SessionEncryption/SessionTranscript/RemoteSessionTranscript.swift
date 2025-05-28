@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import SwiftCBOR
 
 public struct RemoteSessionTranscript: CBOREncodable, SessionTranscript {
     
